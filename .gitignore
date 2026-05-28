@@ -1,0 +1,46 @@
+# Python virtual environment
+.venv/
+**/.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Frontend dependencies
+node_modules/
+**/node_modules/
+build/
+**/build/
+dist/
+**/dist/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+
+# Data folders
+data/
+**/data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Torch / ML model binaries
+*.lib
+*.dll
+*.so
+*.pth
+*.bin
