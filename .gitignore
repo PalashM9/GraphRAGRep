@@ -29,6 +29,8 @@ dist/
 # Data folders
 data/
 **/data/
+!graphrag/backend/data/
+!graphrag/backend/data/thesis.pdf
 
 # OS
 .DS_Store
