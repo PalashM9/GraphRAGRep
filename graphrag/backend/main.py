@@ -1,14 +1,10 @@
-"""
-main.py – FastAPI application with all GraphRAG endpoints.
-
-"""
-
 from __future__ import annotations
 
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -33,26 +29,51 @@ BASE_DIR = Path(__file__).resolve().parent
 PDF_PATH = BASE_DIR / "data" / "thesis.pdf"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
+_ingest_lock = Lock()
+_ingested = False
+_ingest_error: Optional[str] = None
+
+
+def ensure_ingested() -> None:
+    global _ingested, _ingest_error
+    if _ingested:
+        return
+    with _ingest_lock:
+        if _ingested:
+            return
+        logger.info("Starting ingestion pipeline...")
+        logger.info(f"BASE_DIR: {BASE_DIR}")
+        logger.info(f"PDF_PATH: {PDF_PATH}")
+        logger.info(f"PDF exists: {PDF_PATH.exists()}")
+        logger.info(f"PDF is file: {PDF_PATH.is_file()}")
+        logger.info(f"Data dir exists: {PDF_PATH.parent.exists()}")
+
+        if not PDF_PATH.exists() or not PDF_PATH.is_file():
+            _ingest_error = f"Missing PDF at {PDF_PATH}"
+            raise HTTPException(status_code=500, detail=_ingest_error)
+
+        try:
+            ingest(PDF_PATH, EMBEDDING_MODEL)
+            _ingested = True
+            _ingest_error = None
+            logger.info("Ingestion completed successfully.")
+            logger.info(f"Chapters loaded: {len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0}")
+            logger.info(f"Graph nodes: {APP_STATE.graph.number_of_nodes() if APP_STATE.graph else 0}")
+            logger.info(f"Graph edges: {APP_STATE.graph.number_of_edges() if APP_STATE.graph else 0}")
+        except Exception as e:
+            _ingest_error = str(e)
+            logger.exception(f"Ingestion failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Ingestion failed: {_ingest_error}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run ingestion on startup."""
-    logger.info("Starting ingestion pipeline...")
+    logger.info("Application startup complete.")
     logger.info(f"BASE_DIR: {BASE_DIR}")
     logger.info(f"PDF_PATH: {PDF_PATH}")
     logger.info(f"PDF exists: {PDF_PATH.exists()}")
     logger.info(f"PDF is file: {PDF_PATH.is_file()}")
     logger.info(f"Data dir exists: {PDF_PATH.parent.exists()}")
-
-    try:
-        ingest(PDF_PATH, EMBEDDING_MODEL)
-        logger.info("Ingestion completed successfully.")
-        logger.info(f"Chapters loaded: {len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0}")
-        logger.info(f"Graph nodes: {APP_STATE.graph.number_of_nodes() if APP_STATE.graph else 0}")
-        logger.info(f"Graph edges: {APP_STATE.graph.number_of_edges() if APP_STATE.graph else 0}")
-    except Exception as e:
-        logger.exception(f"Ingestion failed: {e}")
-
     yield
     logger.info("Shutting down.")
 
@@ -87,7 +108,19 @@ def root() -> dict:
         "message": "Thesis GraphRAG API is running",
         "pdf_path": str(PDF_PATH),
         "pdf_exists": PDF_PATH.exists(),
+        "ingested": _ingested,
+        "ingest_error": _ingest_error,
         "chapter_count": len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0,
+    }
+
+
+@app.get("/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "pdf_exists": PDF_PATH.exists(),
+        "ingested": _ingested,
+        "ingest_error": _ingest_error,
     }
 
 
@@ -101,12 +134,16 @@ def debug_pdf() -> dict:
         "is_file": PDF_PATH.is_file(),
         "parent_exists": PDF_PATH.parent.exists(),
         "parent_contents": sorted([p.name for p in PDF_PATH.parent.iterdir()]) if PDF_PATH.parent.exists() else [],
+        "ingested": _ingested,
+        "ingest_error": _ingest_error,
     }
 
 
 @app.get("/debug-state")
 def debug_state() -> dict:
     return {
+        "ingested": _ingested,
+        "ingest_error": _ingest_error,
         "chapter_count": len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0,
         "chapters_preview": APP_STATE.chapter_tree[:3] if APP_STATE.chapter_tree else [],
         "graph_nodes": APP_STATE.graph.number_of_nodes() if APP_STATE.graph else 0,
@@ -116,24 +153,32 @@ def debug_state() -> dict:
     }
 
 
+@app.post("/initialize")
+def initialize() -> dict:
+    ensure_ingested()
+    return {
+        "status": "initialized",
+        "chapter_count": len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0,
+        "graph_nodes": APP_STATE.graph.number_of_nodes() if APP_STATE.graph else 0,
+        "graph_edges": APP_STATE.graph.number_of_edges() if APP_STATE.graph else 0,
+    }
+
+
 @app.get("/graph")
 def get_graph() -> dict:
-    """Return the full knowledge graph (nodes + edges)."""
+    ensure_ingested()
     return graph_to_json(APP_STATE.graph)
 
 
 @app.get("/chapters")
 def get_chapters() -> list[dict]:
-    """Return the chapter/section tree."""
+    ensure_ingested()
     return APP_STATE.chapter_tree
 
 
 @app.get("/node/{node_id}")
 def get_node_detail(node_id: str) -> dict:
-    """
-    Return detailed information + LLM-generated explanation for a node.
-    Implements GraphRAG: fetches relevant chunks and explains via LLM.
-    """
+    ensure_ingested()
     g = APP_STATE.graph
     node = get_node(g, node_id)
     if node is None:
@@ -166,10 +211,7 @@ def get_node_detail(node_id: str) -> dict:
 
 @app.get("/path")
 def get_path(from_node: str, to_node: str) -> dict:
-    """
-    Find the shortest path between two nodes and explain it via LLM.
-    Query params: from_node, to_node
-    """
+    ensure_ingested()
     g = APP_STATE.graph
     for nid in [from_node, to_node]:
         if not g.has_node(nid):
@@ -214,13 +256,7 @@ def get_path(from_node: str, to_node: str) -> dict:
 
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest) -> QueryResponse:
-    """
-    GraphRAG QA endpoint.
-    Step 1: Map question to graph nodes (keyword + embedding).
-    Step 2: k-hop subgraph expansion.
-    Step 3: Retrieve relevant text chunks guided by graph.
-    Step 4: LLM answer generation.
-    """
+    ensure_ingested()
     g = APP_STATE.graph
     vs = APP_STATE.vector_store
     model = APP_STATE.embedding_model

@@ -1,12 +1,5 @@
 """
-ingest.py – Thesis-aware ingestion for Palash Mishra's Master's Thesis:
-"A Generative Artificial Intelligence Approach for Enabling Automatic
-Speech Recognition: Seamless Issue Logging, Accent Acquisition, Noise
-Handling and Post-Processing"
-Bauhaus-Universität Weimar, 2025
-
-Place thesis PDF at: backend/data/thesis.pdf
-Run standalone: python ingest.py  (for testing)
+ingest.py 
 """
 
 from __future__ import annotations
@@ -18,25 +11,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import fitz  # PyMuPDF
+import fitz
 import networkx as nx
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Data classes
-# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class TextChunk:
     chunk_id: str
     text: str
     page: int
-    chapter: str          # e.g. "Chapter 3 Methodology"
+    chapter: str
     chapter_index: int
-    section: str          # e.g. "3.2 Dataset Preprocessing"
-    section_index: str    # e.g. "3.2"
+    section: str
+    section_index: str
     graph_nodes: list[str] = field(default_factory=list)
     embedding: Any = None
 
@@ -46,18 +36,14 @@ class AppState:
     """Singleton holding graph, chunks and vector store after ingestion."""
     graph: nx.DiGraph = field(default_factory=nx.DiGraph)
     chunks: list[TextChunk] = field(default_factory=list)
-    vector_store: Any = None          # VectorStore instance
-    embedding_model: Any = None       # sentence_transformers model
+    vector_store: Any = None
+    embedding_model: Any = None
     chapter_tree: list[dict] = field(default_factory=list)
 
 
 APP_STATE = AppState()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Thesis-specific knowledge dictionaries
-# Derived directly from reading the thesis ToC, figures, tables, equations.
-# ─────────────────────────────────────────────────────────────────────────────
 
 THESIS_CHAPTERS = {
     1: "Introduction",
@@ -68,7 +54,6 @@ THESIS_CHAPTERS = {
     6: "Summary",
 }
 
-# All real sections from the thesis Table of Contents (page 9-11)
 THESIS_SECTIONS: dict[str, str] = {
     "1.1": "Research Motivation and Questions",
     "1.2": "Contributions and Structure",
@@ -150,11 +135,7 @@ THESIS_SECTIONS: dict[str, str] = {
     "6": "Summary",
 }
 
-# ── Concept nodes ────────────────────────────────────────────────────────────
-# Derived from reading the full thesis. Each entry:
-#   keyword_variants → (node_id, label, text_snippet)
 THESIS_CONCEPTS: list[tuple[list[str], str, str, str]] = [
-    # (keyword_list, node_id, label, snippet)
     (["automatic speech recognition", "asr", "speech recognition"],
      "concept_asr", "ASR (Automatic Speech Recognition)",
      "ASR systems transcribe spoken language into text through interconnected components "
@@ -256,7 +237,6 @@ THESIS_CONCEPTS: list[tuple[list[str], str, str, str]] = [
      "synthetic TTS audio and controlled noise for Whisper fine-tuning."),
 ]
 
-# ── Method nodes ─────────────────────────────────────────────────────────────
 THESIS_METHODS: list[tuple[list[str], str, str, str]] = [
     (["rule-based", "symbol replacement", "camelcase", "number expansion", "acronym"],
      "method_rule_based_preprocessing", "Rule-Based Preprocessing Method",
@@ -319,7 +299,6 @@ THESIS_METHODS: list[tuple[list[str], str, str, str]] = [
      "(HuBERT, WavLM) improve ASR accuracy in noisy factory environments."),
 ]
 
-# ── Metric nodes ─────────────────────────────────────────────────────────────
 THESIS_METRICS: list[tuple[list[str], str, str, str]] = [
     (["word error rate", "wer"],
      "metric_wer", "WER (Word Error Rate)",
@@ -377,7 +356,6 @@ THESIS_METRICS: list[tuple[list[str], str, str, str]] = [
      "preprocessing output quality across corpus samples."),
 ]
 
-# ── Result / Finding nodes ────────────────────────────────────────────────────
 THESIS_RESULTS: list[tuple[list[str], str, str, str]] = [
     (["wer 0.31", "cer 0.05", "rouge 0.90", "bertscore 0.87", "aggregate performance"],
      "result_whisper_finetuning", "Fine-Tuned Whisper Performance on Test Set",
@@ -406,29 +384,19 @@ THESIS_RESULTS: list[tuple[list[str], str, str, str]] = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Regex patterns for heading detection
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Matches: "1 Introduction", "2 Background", "3 Methodology" etc.
 CHAPTER_HEADING_RE = re.compile(
     r"^(Chapter\s+)?(\d)\s+(Introduction|Background|Methodology|Results|Future\s*Work|Summary)",
     re.IGNORECASE,
 )
-# Matches section headings like "2.1", "3.2.1", "4.6.2" etc.
 SECTION_HEADING_RE = re.compile(
     r"^(\d\.\d+(?:\.\d+)?)\s+([A-Z][^\n]{3,80})",
 )
-# Fallback: heading-looking line (title case, short, no period at end)
 TITLE_LINE_RE = re.compile(r"^[A-Z][A-Za-z0-9\s,\-\(\)/:]{10,80}$")
 
-# Pages to skip (front matter)
-SKIP_PAGES_BEFORE = 17   # thesis content starts around page 18 (Chapter 1)
+SKIP_PAGES_BEFORE = 17
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PDF extraction helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def extract_pages(pdf_path: Path) -> list[dict]:
     """Return list of {page_number, text} dicts from the PDF."""
@@ -444,18 +412,12 @@ def extract_pages(pdf_path: Path) -> list[dict]:
 
 def clean_text(text: str) -> str:
     """Remove hyphenated line-breaks and normalise whitespace."""
-    # Reconnect hyphenated words across line breaks
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
-    # Collapse multiple spaces/tabs
     text = re.sub(r"[ \t]+", " ", text)
-    # Keep single newlines but remove triple+
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Structure detection
-# ─────────────────────────────────────────────────────────────────────────────
 
 def detect_chapter_from_text(text: str) -> tuple[int | None, str | None]:
     """Detect chapter number and title from page text."""
@@ -466,7 +428,6 @@ def detect_chapter_from_text(text: str) -> tuple[int | None, str | None]:
             ch_num = int(m.group(2))
             ch_title = m.group(3).strip()
             return ch_num, f"Chapter {ch_num} {ch_title}"
-        # Also match "Chapter3Methodology" style (no spaces, from PDF extraction)
         m2 = re.match(r"Chapter(\d)(Introduction|Background|Methodology|Results|FutureWork|Summary)",
                       line.replace(" ", ""), re.IGNORECASE)
         if m2:
@@ -484,17 +445,13 @@ def detect_section_from_text(text: str) -> tuple[str | None, str | None]:
         if m:
             sec_num = m.group(1)
             sec_title = m.group(2).strip()
-            # Cross-reference with known sections
             known = THESIS_SECTIONS.get(sec_num)
             return sec_num, known if known else sec_title
     return None, None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Chunking
-# ─────────────────────────────────────────────────────────────────────────────
 
-CHUNK_SIZE_CHARS = 1200    # ~350 tokens at 3.5 chars/token
+CHUNK_SIZE_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 200
 
 
@@ -508,7 +465,6 @@ def chunk_text(
     chunk_id_prefix: str,
 ) -> list[TextChunk]:
     """Split text into overlapping chunks respecting paragraph boundaries."""
-    # Split at paragraph boundaries first
     paragraphs = re.split(r"\n\n+", text)
     chunks: list[TextChunk] = []
     current = ""
@@ -532,7 +488,6 @@ def chunk_text(
                     section_index=section_index,
                 ))
                 chunk_idx += 1
-                # Keep overlap
                 overlap_text = current[-CHUNK_OVERLAP_CHARS:] if len(current) > CHUNK_OVERLAP_CHARS else current
                 current = overlap_text + "\n\n" + para
             else:
@@ -552,9 +507,6 @@ def chunk_text(
     return chunks
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Graph construction
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_chapter_node_id(ch_idx: int) -> str:
     return f"chapter_{ch_idx}"
@@ -581,11 +533,9 @@ def ensure_section_node(g: nx.DiGraph, sec_num: str, ch_idx: int) -> str:
         g.add_node(nid, id=nid, label=label, type="Section",
                    chapter_index=ch_idx, section_index=sec_num,
                    text_snippet=THESIS_SECTIONS.get(sec_num, label))
-        # Connect to chapter
         parent_ch = int(sec_num.split(".")[0])
         ch_nid = ensure_chapter_node(g, parent_ch)
         g.add_edge(ch_nid, nid, rel="CONTAINS")
-        # Connect subsection to parent section if applicable
         parts = sec_num.split(".")
         if len(parts) >= 3:
             parent_sec = ".".join(parts[:2])
@@ -593,7 +543,6 @@ def ensure_section_node(g: nx.DiGraph, sec_num: str, ch_idx: int) -> str:
             if g.has_node(parent_nid):
                 g.add_edge(parent_nid, nid, rel="CONTAINS")
         elif len(parts) == 2 and int(parts[1]) > 1:
-            # Add PRECEDES edge from previous section
             prev_sec = f"{parts[0]}.{int(parts[1])-1}"
             prev_nid = build_section_node_id(prev_sec)
             if g.has_node(prev_nid):
@@ -603,22 +552,18 @@ def ensure_section_node(g: nx.DiGraph, sec_num: str, ch_idx: int) -> str:
 
 def add_predefined_nodes(g: nx.DiGraph) -> None:
     """Add all concept, method, and metric nodes from the thesis dictionaries."""
-    # Concepts
     for _, nid, label, snippet in THESIS_CONCEPTS:
         g.add_node(nid, id=nid, label=label, type="Concept",
                    chapter_index=None, section_index=None, text_snippet=snippet)
 
-    # Methods
     for _, nid, label, snippet in THESIS_METHODS:
         g.add_node(nid, id=nid, label=label, type="Method",
                    chapter_index=None, section_index=None, text_snippet=snippet)
 
-    # Metrics
     for _, nid, label, snippet in THESIS_METRICS:
         g.add_node(nid, id=nid, label=label, type="Metric",
                    chapter_index=None, section_index=None, text_snippet=snippet)
 
-    # Results
     for _, nid, label, snippet in THESIS_RESULTS:
         g.add_node(nid, id=nid, label=label, type="Result",
                    chapter_index=None, section_index=None, text_snippet=snippet)
@@ -627,7 +572,6 @@ def add_predefined_nodes(g: nx.DiGraph) -> None:
 def add_predefined_edges(g: nx.DiGraph) -> None:
     """Add hand-crafted semantic edges derived from reading the thesis."""
     edges = [
-        # Chapter-level thematic edges
         ("chapter_3", "concept_preprocessing", "EXPLAINS"),
         ("chapter_3", "concept_synthetic_audio", "EXPLAINS"),
         ("chapter_3", "concept_finetuning", "EXPLAINS"),
@@ -648,7 +592,6 @@ def add_predefined_edges(g: nx.DiGraph) -> None:
         ("chapter_4", "result_tts_comparison", "MENTIONS"),
         ("chapter_4", "result_llm_postprocessing", "MENTIONS"),
 
-        # Method → Metric uses
         ("method_ctc_alignment", "metric_forced_alignment_score", "USES"),
         ("method_lcs_similarity", "metric_structural_similarity", "USES"),
         ("method_rule_based_preprocessing", "metric_structural_similarity", "USES"),
@@ -658,7 +601,6 @@ def add_predefined_edges(g: nx.DiGraph) -> None:
         ("method_reward_model", "metric_bertscore", "USES"),
         ("method_reward_model", "metric_rouge", "USES"),
 
-        # Concept → Concept relationships
         ("concept_preprocessing", "concept_tts", "PRECEDES"),
         ("concept_tts", "concept_synthetic_audio", "USES"),
         ("concept_synthetic_audio", "concept_finetuning", "PRECEDES"),
@@ -671,7 +613,6 @@ def add_predefined_edges(g: nx.DiGraph) -> None:
         ("concept_nlp", "concept_tts", "ENHANCES"),
         ("concept_lora", "concept_finetuning", "USES"),
 
-        # Section → Concept mentions
         ("section_3_2", "concept_preprocessing", "EXPLAINS"),
         ("section_3_2_1", "concept_rule_based_preprocessing", "EXPLAINS"),
         ("section_3_2_2", "concept_llm_preprocessing", "EXPLAINS"),
@@ -705,7 +646,6 @@ def add_predefined_edges(g: nx.DiGraph) -> None:
         ("section_4_1", "result_preprocessing", "MENTIONS"),
         ("section_4_3", "result_tts_comparison", "MENTIONS"),
 
-        # Method → Concept
         ("method_rule_based_preprocessing", "concept_rule_based_preprocessing", "IMPLEMENTS"),
         ("method_llm_based_preprocessing", "concept_llm_preprocessing", "IMPLEMENTS"),
         ("method_whisperspeech", "concept_whisper", "USES"),
@@ -717,14 +657,12 @@ def add_predefined_edges(g: nx.DiGraph) -> None:
         ("method_noise_handling", "concept_noise", "ADDRESSES"),
         ("method_noise_handling", "concept_vad", "USES"),
 
-        # TTS model → metric links
         ("method_whisperspeech", "metric_forced_alignment_score", "EVALUATED_BY"),
         ("method_bark", "metric_forced_alignment_score", "EVALUATED_BY"),
         ("method_parler", "metric_forced_alignment_score", "EVALUATED_BY"),
         ("method_kokoro", "metric_forced_alignment_score", "EVALUATED_BY"),
         ("method_f5tts", "metric_forced_alignment_score", "EVALUATED_BY"),
 
-        # Result → Metric
         ("result_whisper_finetuning", "metric_wer", "USES"),
         ("result_whisper_finetuning", "metric_cer", "USES"),
         ("result_whisper_finetuning", "metric_rouge", "USES"),
@@ -742,9 +680,6 @@ def add_predefined_edges(g: nx.DiGraph) -> None:
             logger.debug(f"Skipping edge {src}→{tgt} ({rel}): missing nodes {missing}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Keyword detection for chunk → graph node linking
-# ─────────────────────────────────────────────────────────────────────────────
 
 def detect_mentioned_nodes(text: str, g: nx.DiGraph) -> list[str]:
     """
@@ -761,12 +696,9 @@ def detect_mentioned_nodes(text: str, g: nx.DiGraph) -> list[str]:
                 if g.has_node(nid):
                     found.append(nid)
 
-    return list(dict.fromkeys(found))   # deduplicate, preserve order
+    return list(dict.fromkeys(found))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Chapter tree builder (for /chapters API)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_chapter_tree(g: nx.DiGraph) -> list[dict]:
     """Build the chapter → section tree for the sidebar."""
@@ -782,7 +714,6 @@ def build_chapter_tree(g: nx.DiGraph) -> list[dict]:
                 sec_nid = build_section_node_id(sec_num)
                 if g.has_node(sec_nid):
                     sec_data = dict(g.nodes[sec_nid])
-                    # Subsections
                     subsections = []
                     for sub_num in THESIS_SECTIONS:
                         if sub_num.startswith(sec_num + "."):
@@ -796,9 +727,6 @@ def build_chapter_tree(g: nx.DiGraph) -> list[dict]:
     return tree
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main ingestion entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> None:
     """
@@ -820,36 +748,29 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
                      "Place thesis.pdf in backend/data/ and restart.")
         return
 
-    # ── 1. Extract PDF pages ─────────────────────────────────────────────────
     pages = extract_pages(pdf_path)
     content_pages = [p for p in pages if p["page_number"] >= SKIP_PAGES_BEFORE]
     logger.info(f"Processing {len(content_pages)} content pages "
                 f"(skipping first {SKIP_PAGES_BEFORE-1} front-matter pages)")
 
-    # ── 2. Initialise graph and add predefined nodes ─────────────────────────
     g = nx.DiGraph()
     add_predefined_nodes(g)
 
-    # Ensure all chapter nodes exist
     for ch_idx in THESIS_CHAPTERS:
         ensure_chapter_node(g, ch_idx)
 
-    # Ensure all section nodes exist (seeded from known ToC)
     for sec_num in THESIS_SECTIONS:
         ch_idx = int(sec_num.split(".")[0])
         ensure_section_node(g, sec_num, ch_idx)
 
-    # PRECEDES edges between chapters
     ch_ids = sorted(THESIS_CHAPTERS.keys())
     for i in range(len(ch_ids) - 1):
         g.add_edge(build_chapter_node_id(ch_ids[i]),
                    build_chapter_node_id(ch_ids[i + 1]),
                    rel="PRECEDES")
 
-    # Add all hand-crafted semantic edges
     add_predefined_edges(g)
 
-    # ── 3. Parse pages → track current chapter/section ──────────────────────
     all_chunks: list[TextChunk] = []
     current_chapter_idx = 0
     current_chapter_label = "Preamble"
@@ -861,13 +782,11 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
         raw_text = page_data["text"]
         text = clean_text(raw_text)
 
-        # Detect chapter boundary
         ch_idx, ch_label = detect_chapter_from_text(raw_text)
         if ch_idx is not None:
             current_chapter_idx = ch_idx
             current_chapter_label = ch_label
 
-        # Detect section boundary
         sec_num, sec_label = detect_section_from_text(raw_text)
         if sec_num is not None:
             current_section_num = sec_num
@@ -876,7 +795,6 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
         if not text or len(text) < 60:
             continue
 
-        # Build a chunk prefix based on location
         safe_ch = f"ch{current_chapter_idx}"
         safe_sec = current_section_num.replace(".", "_") if current_section_num else "nosec"
         chunk_prefix = f"chunk_{safe_ch}_{safe_sec}_p{pnum}"
@@ -892,14 +810,12 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
         )
 
         for chunk in page_chunks:
-            # Attach chunk node to graph
             chunk_nid = f"chunk_{chunk.chunk_id}"
             g.add_node(chunk_nid, id=chunk_nid, label=f"Chunk p.{pnum}",
                        type="Chunk", chapter_index=current_chapter_idx,
                        section_index=current_section_num,
                        text_snippet=chunk.text[:150])
 
-            # CONTAINS edges: section/chapter → chunk
             if current_section_num:
                 sec_nid = build_section_node_id(current_section_num)
                 if g.has_node(sec_nid):
@@ -909,7 +825,6 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
                 if g.has_node(ch_nid):
                     g.add_edge(ch_nid, chunk_nid, rel="CONTAINS")
 
-            # MENTIONS edges: chunk → concepts/methods/metrics
             mentioned = detect_mentioned_nodes(chunk.text, g)
             chunk.graph_nodes = [current_section_num, current_chapter_label] + mentioned
             for mnid in mentioned:
@@ -927,7 +842,6 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
     logger.info(f"  Results:  {sum(1 for _,d in g.nodes(data=True) if d.get('type')=='Result')}")
     logger.info(f"  Chunks:   {sum(1 for _,d in g.nodes(data=True) if d.get('type')=='Chunk')}")
 
-    # ── 4. Load embedding model ───────────────────────────────────────────────
     embedding_model = None
     try:
         from sentence_transformers import SentenceTransformer
@@ -938,7 +852,6 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
         logger.warning(f"Could not load sentence-transformers: {e}. "
                        "Vector search will be disabled.")
 
-    # ── 5. Compute embeddings ─────────────────────────────────────────────────
     if embedding_model is not None:
         logger.info(f"Computing embeddings for {len(all_chunks)} chunks…")
         texts = [c.text for c in all_chunks]
@@ -954,15 +867,12 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
     else:
         embeddings = None
 
-    # ── 6. Build vector store ─────────────────────────────────────────────────
     vs = VectorStore()
     vs.build(all_chunks)
     logger.info("Vector store built.")
 
-    # ── 7. Build chapter tree ─────────────────────────────────────────────────
     chapter_tree = build_chapter_tree(g)
 
-    # ── 8. Update APP_STATE ───────────────────────────────────────────────────
     APP_STATE.graph = g
     APP_STATE.chunks = all_chunks
     APP_STATE.vector_store = vs
@@ -973,9 +883,6 @@ def ingest(pdf_path: Path, embedding_model_name: str = "all-MiniLM-L6-v2") -> No
     logger.info("=" * 60)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Standalone test
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys
