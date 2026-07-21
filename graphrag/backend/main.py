@@ -1,10 +1,6 @@
 """
 main.py – FastAPI application with all GraphRAG endpoints.
 
-Run with:
-    uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-Place your thesis PDF at: graphrag/backend/data/thesis.pdf
 """
 
 from __future__ import annotations
