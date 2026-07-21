@@ -4,7 +4,7 @@ main.py – FastAPI application with all GraphRAG endpoints.
 Run with:
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
-Place your thesis PDF at: backend/data/thesis.pdf
+Place your thesis PDF at: graphrag/backend/data/thesis.pdf
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,15 +33,30 @@ from llm import generate_answer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PDF_PATH = Path(__file__).parent / "data" / "thesis.pdf"
+BASE_DIR = Path(__file__).resolve().parent
+PDF_PATH = BASE_DIR / "data" / "thesis.pdf"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run ingestion on startup."""
-    logger.info("Starting ingestion pipeline …")
-    ingest(PDF_PATH, EMBEDDING_MODEL)
+    logger.info("Starting ingestion pipeline...")
+    logger.info(f"BASE_DIR: {BASE_DIR}")
+    logger.info(f"PDF_PATH: {PDF_PATH}")
+    logger.info(f"PDF exists: {PDF_PATH.exists()}")
+    logger.info(f"PDF is file: {PDF_PATH.is_file()}")
+    logger.info(f"Data dir exists: {PDF_PATH.parent.exists()}")
+
+    try:
+        ingest(PDF_PATH, EMBEDDING_MODEL)
+        logger.info("Ingestion completed successfully.")
+        logger.info(f"Chapters loaded: {len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0}")
+        logger.info(f"Graph nodes: {APP_STATE.graph.number_of_nodes() if APP_STATE.graph else 0}")
+        logger.info(f"Graph edges: {APP_STATE.graph.number_of_edges() if APP_STATE.graph else 0}")
+    except Exception as e:
+        logger.exception(f"Ingestion failed: {e}")
+
     yield
     logger.info("Shutting down.")
 
@@ -57,10 +72,6 @@ app.add_middleware(
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Request / Response models
-# ─────────────────────────────────────────────────────────────────────────────
-
 class QueryRequest(BaseModel):
     question: str
     top_k_chunks: int = 10
@@ -74,9 +85,40 @@ class QueryResponse(BaseModel):
     graph_subgraph: Optional[dict] = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Endpoints
-# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/")
+def root() -> dict:
+    return {
+        "message": "Thesis GraphRAG API is running",
+        "pdf_path": str(PDF_PATH),
+        "pdf_exists": PDF_PATH.exists(),
+        "chapter_count": len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0,
+    }
+
+
+@app.get("/debug-pdf")
+def debug_pdf() -> dict:
+    return {
+        "base_dir": str(BASE_DIR),
+        "cwd": str(Path.cwd()),
+        "pdf_path": str(PDF_PATH),
+        "exists": PDF_PATH.exists(),
+        "is_file": PDF_PATH.is_file(),
+        "parent_exists": PDF_PATH.parent.exists(),
+        "parent_contents": sorted([p.name for p in PDF_PATH.parent.iterdir()]) if PDF_PATH.parent.exists() else [],
+    }
+
+
+@app.get("/debug-state")
+def debug_state() -> dict:
+    return {
+        "chapter_count": len(APP_STATE.chapter_tree) if APP_STATE.chapter_tree else 0,
+        "chapters_preview": APP_STATE.chapter_tree[:3] if APP_STATE.chapter_tree else [],
+        "graph_nodes": APP_STATE.graph.number_of_nodes() if APP_STATE.graph else 0,
+        "graph_edges": APP_STATE.graph.number_of_edges() if APP_STATE.graph else 0,
+        "has_vector_store": APP_STATE.vector_store is not None,
+        "embedding_model_loaded": APP_STATE.embedding_model is not None,
+    }
+
 
 @app.get("/graph")
 def get_graph() -> dict:
@@ -104,11 +146,9 @@ def get_node_detail(node_id: str) -> dict:
     neighbors = get_neighbors(g, node_id)
     neighbor_labels = [n["label"] for n in neighbors[:10]]
 
-    # Retrieve relevant chunks from the vector store
     relevant_chunks = APP_STATE.vector_store.chunks_for_nodes([node_id], limit=5)
     chunk_texts = [c.text for c in relevant_chunks]
 
-    # Build explanation prompt
     prompt = _build_node_explanation_prompt(node, neighbor_labels, chunk_texts)
     explanation = generate_answer(prompt)
 
@@ -157,7 +197,6 @@ def get_path(from_node: str, to_node: str) -> dict:
                 f"{node_data.get('text_snippet', '')[:150]}"
             )
 
-    # Edges along path
     path_edges = []
     for i in range(len(path_ids) - 1):
         if g.has_edge(path_ids[i], path_ids[i + 1]):
@@ -190,33 +229,25 @@ def query(req: QueryRequest) -> QueryResponse:
     vs = APP_STATE.vector_store
     model = APP_STATE.embedding_model
 
-    # ── Step 1: Find seed nodes ────────────────────────────────────────────
     seed_ids = top_k_nodes_by_label(g, req.question, k=6)
 
-    # Also use embedding similarity if model is available
     if model is not None:
-        import numpy as np
-        q_emb = list(model.embed([req.question]))[0].astype("float32")  
+        q_emb = list(model.embed([req.question]))[0].astype("float32")
         emb_results = vs.query(q_emb, k=req.top_k_chunks)
         for cr in emb_results[:4]:
             for nid in cr.graph_nodes:
                 if nid not in seed_ids:
                     seed_ids.append(nid)
 
-    # ── Step 2: k-hop subgraph ─────────────────────────────────────────────
     subgraph_nodes, subgraph_edges = k_hop_subgraph(g, seed_ids, k=req.hop_k)
     subgraph_node_ids = [n["id"] for n in subgraph_nodes]
 
-    # ── Step 3: Retrieve chunks ────────────────────────────────────────────
     candidate_chunks = vs.chunks_for_nodes(subgraph_node_ids, limit=req.top_k_chunks * 2)
 
-    # Refine with embedding similarity
     if model is not None and candidate_chunks:
-        import numpy as np
         q_emb = list(model.embed([req.question]))[0].astype("float32")
         emb_top = vs.query(q_emb, k=req.top_k_chunks)
         emb_ids = {cr.chunk_id for cr in emb_top}
-        # Merge: prioritise chunks that appear in both lists
         merged: list = []
         for c in candidate_chunks:
             if c.chunk_id in emb_ids:
@@ -227,7 +258,6 @@ def query(req: QueryRequest) -> QueryResponse:
     else:
         candidate_chunks = candidate_chunks[: req.top_k_chunks]
 
-    # ── Step 4: Build prompt and generate answer ───────────────────────────
     prompt = _build_query_prompt(req.question, candidate_chunks, subgraph_nodes)
     answer = generate_answer(prompt)
 
@@ -251,13 +281,7 @@ def query(req: QueryRequest) -> QueryResponse:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prompt builders
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_query_prompt(
-    question: str, chunks: list, relevant_nodes: list[dict]
-) -> str:
+def _build_query_prompt(question: str, chunks: list, relevant_nodes: list[dict]) -> str:
     node_summary = "\n".join(
         f"- [{n.get('type','?')}] {n.get('label','?')}"
         for n in relevant_nodes[:15]
